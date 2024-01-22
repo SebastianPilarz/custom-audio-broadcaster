@@ -28,6 +28,7 @@ nlohmann::json Room::to_json() const
   json["description"] = description;
   json["max_readers"] = max_readers;
   json["urls"] = urls.to_json();
+  json["data_url"] = data_url;
   json["has_audio_data_provider"] = has_audio_data_provider;
   json["has_text_data_provider"] = has_text_data_provider;
   return json;
@@ -60,7 +61,7 @@ void Broadcaster::start_http_server(const std::string &ip, int port)
                         {"title", room.second.title},
                         {"description", room.second.description},
                         {"audioUrls", room.second.urls.to_json()},
-                        {"textDataUrl", server_ip + ':' + std::to_string(server_port) + "/v1/rooms/" + room.first + "/text"},
+                        {"dataUrl", server_ip + ':' + std::to_string(server_port) + "/v1/rooms/" + room.first + "/data"},
                         {"currentClientsNumber", clients.size()},
                         {"maxClientsNumber", room.second.max_readers}};
                     rooms_json.push_back(room_json);
@@ -68,7 +69,7 @@ void Broadcaster::start_http_server(const std::string &ip, int port)
           response_json["rooms"] = rooms_json;
           res.set_content(response_json.dump(), "application/json"); });
 
-    server.Get(R"(/v1/rooms/(\w+)/text)", [this](const httplib::Request &req, httplib::Response &res)
+    server.Get(R"(/v1/rooms/(\w+)/data)", [this](const httplib::Request &req, httplib::Response &res)
                {
                    const std::string path = req.matches[1];
                    auto data = json{};
@@ -82,13 +83,9 @@ void Broadcaster::start_http_server(const std::string &ip, int port)
                    {
                      if (rooms.at(path).text_data_provider.has_value())
                      {
-                        data["data"] = rooms.at(path).text_data_provider.value()();
-                     }
-                     else{
-                       data["data"] = "";
+                        rooms.at(path).text_data_provider.value()(data);
                      }
                    }
-                   // auto data = json{{"message", "Hello from * room!"}};
                    res.set_content(data.dump(), "application/json"); });
 
     server_thread = std::thread([&]()
@@ -133,7 +130,7 @@ void Broadcaster::unpublish_audio(const std::string &path)
   }
 }
 
-void Broadcaster::publish_text(const std::string &path, const std::function<std::string()> &data_provider)
+void Broadcaster::publish_text_data(const std::string &path, const std::function<void(json &data)> &data_provider)
 {
   if (!does_room_exist(path))
   {
@@ -143,7 +140,7 @@ void Broadcaster::publish_text(const std::string &path, const std::function<std:
   rooms.at(path).text_data_provider = data_provider;
 }
 
-void Broadcaster::unpublish_text(const std::string &path)
+void Broadcaster::unpublish_text_data(const std::string &path)
 {
   if (!does_room_exist(path))
   {
@@ -202,7 +199,7 @@ std::vector<Room> Broadcaster::get_rooms()
   std::vector<Room> rooms = {};
   for (const auto &room : this->rooms)
   {
-    rooms.emplace_back(Room{room.first, room.second.title, room.second.description, room.second.max_readers, room.second.urls, room.second.pusher.has_value(), room.second.text_data_provider.has_value()});
+    rooms.emplace_back(Room{room.first, room.second.title, room.second.description, room.second.max_readers, room.second.urls, room.second.data_url, room.second.pusher.has_value(), room.second.text_data_provider.has_value()});
   }
   return rooms;
 }
@@ -304,7 +301,9 @@ void Broadcaster::create_new_room(const std::string &path, const std::string &ti
     throw std::runtime_error("Invalid json");
   }
 
-  rooms.try_emplace(path, RoomData{title, description, max_readers, urls, std::nullopt, std::nullopt});
+  const auto data_url = server_ip + ':' + std::to_string(server_port) + "/v1/rooms/" + path + "/data";
+
+  rooms.try_emplace(path, RoomData{title, description, max_readers, urls, data_url, std::nullopt, std::nullopt});
 }
 
 void Broadcaster::delete_room(const std::string &path)
@@ -315,7 +314,7 @@ void Broadcaster::delete_room(const std::string &path)
   }
 
   unpublish_audio(path);
-  unpublish_text(path);
+  unpublish_text_data(path);
 
   const auto res = api_client.Delete("/v3/config/paths/delete/" + path);
   if (!res)
